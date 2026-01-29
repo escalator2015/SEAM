@@ -35,7 +35,8 @@
 <br>
 
 ## 🚀 Instalación y uso
-
+python3.11 -m venv venv
+source venv/bin/activate
 ### Requisitos
 
 * Linux con PulseAudio o pipewire‑pulse
@@ -43,7 +44,7 @@
 
 ```bash
 sudo apt install python3-pip pulseaudio-utils ffmpeg
-pip install -r requirements.txt
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128 --retries 10 --timeout 600
 ```
 
 > El `requirements.txt` incluye **solo** dependencias mínimas para ejecutar STT/S2ST con SeamlessM4T.
@@ -189,6 +190,8 @@ python marvin4000_seam.py --audio-device "alsa_output.pci-0000_00_1f.3.analog-st
 
 # S2ST inglés → español con salida por dispositivo default
 python marvin4000_seam.py --audio-device "virtual_sink.monitor" --mode s2st --src-lang eng --tgt-lang spa --output-device "default"
+
+python marvin4000_seam.py --audio-device "virtual_sink.monitor" --mode s2st --src-lang spa --tgt-lang eng --output-device "default" --rms-threshold 0.0005 --parec-latency-ms 10
 
 # S2ST francés → inglés con sample rate de salida personalizado
 python marvin4000_seam.py --audio-device "virtual_sink.monitor" --mode s2st --src-lang fra --tgt-lang eng --output-device "default" --output-sr 22050

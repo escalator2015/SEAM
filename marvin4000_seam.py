@@ -34,12 +34,13 @@ CHUNK_SEC          = 1.5
 NATIVE_SR          = 48000
 TARGET_SR          = 16000
 CHANNELS           = 2
-QUEUE_MAX          = 32
+QUEUE_MAX          = 128
 TIMEOUT_SEC        = 12.0
 SILENCE_SEC        = 0.8
 MIN_SEGMENT_SEC    = 0.5
 MIN_WORDS_FOR_SENT = 4
 MIN_PARTIAL_WORDS  = 5
+PAREC_LATENCY_MS   = 20
 
 # Audio processing thresholds
 AUDIO_RMS_THRESHOLD = 0.0025  # Minimum RMS level to process audio
@@ -127,19 +128,20 @@ class AudioPlayer(threading.Thread):
 
 # Producer
 class AudioProducer(threading.Thread):
-    def __init__(self, q: queue.Queue[np.ndarray], audio_device: str):
+    def __init__(self, q: queue.Queue[np.ndarray], audio_device: str, latency_ms: int):
         super().__init__(daemon=True)
         self.q = q
         self.audio_device = audio_device
+        self.latency_ms = latency_ms
         self._stop = threading.Event()
     def stop(self):
         self._stop.set()
     def run(self):
-        frames = int(CHUNK_SEC * NATIVE_SR)
+        frames = int(max(self.latency_ms / 1000.0, 0.05) * NATIVE_SR)
         chunk_bytes = frames * CHANNELS * 4
         cmd = [
             "parec", f"--device={self.audio_device}", "--format=float32le",
-            f"--rate={NATIVE_SR}", f"--channels={CHANNELS}"
+            f"--rate={NATIVE_SR}", f"--channels={CHANNELS}", f"--latency-msec={self.latency_ms}"
         ]
         log(f"Producer start: {' '.join(cmd)}")
         proc = sp.Popen(cmd, stdout=sp.PIPE, bufsize=chunk_bytes*4)
@@ -147,13 +149,21 @@ class AudioProducer(threading.Thread):
             while not self._stop.is_set():
                 buf = proc.stdout.read(chunk_bytes)
                 if not buf:
+                    log("No audio data from parec. Verifica el dispositivo de entrada y que haya audio reproduciéndose.")
                     break
                 audio = np.frombuffer(buf, dtype="<f4").reshape(-1, CHANNELS)
                 mono  = to_mono_16k(audio, NATIVE_SR)
                 try:
                     self.q.put(mono, timeout=1)
                 except queue.Full:
-                    log("Producer queue full, drop chunk")
+                    try:
+                        _ = self.q.get_nowait()
+                        self.q.put_nowait(mono)
+                    except queue.Empty:
+                        pass
+                    except queue.Full:
+                        pass
+                    log("Producer queue full, dropped oldest chunk")
         finally:
             proc.terminate()
             log("Producer stopped")
@@ -234,7 +244,6 @@ class Transcriber(threading.Thread):
             gen = self.model.generate(
                 **inputs,
                 tgt_lang=self.tgt_lang or self.src_lang,
-                task="transcribe",
                 max_new_tokens=256,
                 num_beams=3,
                 do_sample=False,
@@ -255,16 +264,32 @@ class Transcriber(threading.Thread):
             gen = self.model.generate(
                 **inputs,
                 tgt_lang=self.tgt_lang,
-                task="s2st",
                 generate_speech=True,
                 max_new_tokens=256,
                 num_beams=3,
                 do_sample=False,
             )
 
-        txt = self.processor.batch_decode(gen.sequences, skip_special_tokens=True)[0]
-        speech = self._extract_speech(gen)
-        speech_sr = self._extract_speech_sr(gen)
+        gen_text = gen
+        gen_speech = gen
+        if isinstance(gen, tuple):
+            if len(gen) > 0:
+                gen_text = gen[0]
+            if len(gen) > 1:
+                gen_speech = gen[1]
+
+        seqs = gen_text.sequences if hasattr(gen_text, "sequences") else gen_text
+        txt = ""
+        try:
+            if torch.is_tensor(seqs):
+                if seqs.dtype in (torch.int32, torch.int64, torch.long, torch.int16, torch.int8, torch.uint8):
+                    txt = self.processor.batch_decode(seqs, skip_special_tokens=True)[0]
+            elif isinstance(seqs, (list, tuple)) and seqs and isinstance(seqs[0], (list, tuple, np.ndarray)):
+                txt = self.processor.batch_decode(seqs, skip_special_tokens=True)[0]
+        except Exception:
+            txt = ""
+        speech = self._extract_speech(gen_speech) or self._extract_speech(gen_text)
+        speech_sr = self._extract_speech_sr(gen_speech) or self._extract_speech_sr(gen_text)
         return txt.strip(), speech, speech_sr
 
 
@@ -305,16 +330,22 @@ class Transcriber(threading.Thread):
     
     def run(self):
         log("Transcriber ready")
+        self.last_flush = time.time()
+        last_empty_log = 0.0
         while True:
             try:
                 chunk = self.q.get(timeout=0.5)
             except queue.Empty:
+                now = time.time()
+                if now - last_empty_log >= 5.0:
+                    log("Sin audio en la cola. Revisa el routing al sink virtual y que haya audio reproduciéndose.")
+                    last_empty_log = now
                 continue
 
             # Calculate RMS - objective volume measure
             chunk_rms = np.sqrt(np.mean(np.square(chunk)))
             if chunk_rms < AUDIO_RMS_THRESHOLD:
-                log(f"Audio discarded due to low level: {chunk_rms:.6f}")
+                log(f"Audio descartado por nivel bajo (RMS={chunk_rms:.6f}). Puedes bajar --rms-threshold.")
                 
                 # Process accumulated audio as final segment
                 if self.audio_buffer:
@@ -341,6 +372,14 @@ class Transcriber(threading.Thread):
 
             audio_cat = np.concatenate(self.audio_buffer)
             txt = ""
+            
+            # In S2ST mode, skip expensive partial transcription on every chunk
+            # Only transcribe when we're about to flush
+            now       = time.time()
+            split_idx = self._find_silence_split(audio_cat)
+            timed_out = (now - self.last_flush) >= TIMEOUT_SEC
+            
+            # Only run STT for partials in stt mode
             if self.mode == "stt":
                 txt_raw = self._seamless_stt(audio_cat) or ""
                 txt = self._post_process_asr(txt_raw)
@@ -348,11 +387,10 @@ class Transcriber(threading.Thread):
                 if len(txt.split()) >= MIN_PARTIAL_WORDS and txt != self.last_partial_text:
                     log(f"[PARTIAL] {txt}")
                     self.last_partial_text = txt
-
-            now       = time.time()
-            split_idx = self._find_silence_split(audio_cat)
-            end_sent  = self._has_sentence_end(txt) if self.mode == "stt" else True
-            timed_out = (now - self.last_flush) >= TIMEOUT_SEC
+                
+                end_sent = self._has_sentence_end(txt)
+            else:
+                end_sent = True  # In S2ST always ready when silence detected
 
             if (split_idx is not None and end_sent) or timed_out:
                 cut = split_idx if split_idx is not None else len(audio_cat)
@@ -380,6 +418,7 @@ class Transcriber(threading.Thread):
 
 # Main
 def main():
+    global MODE, SRC_LANG, TGT_LANG, OUTPUT_SR, AUDIO_RMS_THRESHOLD, PAREC_LATENCY_MS
     parser = argparse.ArgumentParser(description="Marvin4000 - Real-time speech with SeamlessM4T end-to-end")
     parser.add_argument("--audio-device", required=True, help="Input monitor device name (PulseAudio, e.g. 'alsa_output.device.monitor')")
     parser.add_argument("--mode", choices=["stt", "s2st"], default="stt", help="Mode: stt (speech->text) or s2st (speech->speech)")
@@ -387,6 +426,8 @@ def main():
     parser.add_argument("--tgt-lang", default=None, help="Target language (required for s2st; optional for stt)")
     parser.add_argument("--output-device", default=None, help="Output device for TTS (sounddevice name or id)")
     parser.add_argument("--output-sr", type=int, default=OUTPUT_SR, help="Output sample rate for TTS")
+    parser.add_argument("--rms-threshold", type=float, default=AUDIO_RMS_THRESHOLD, help="Minimum RMS level to process audio")
+    parser.add_argument("--parec-latency-ms", type=int, default=PAREC_LATENCY_MS, help="parec latency in milliseconds (reduce if no data)")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -403,18 +444,19 @@ def main():
         parser.error("--tgt-lang es requerido en modo s2st")
 
     # Override global variables
-    global MODE, SRC_LANG, TGT_LANG, OUTPUT_SR
     MODE = args.mode
     SRC_LANG = args.src_lang
     TGT_LANG = args.tgt_lang
     OUTPUT_SR = args.output_sr
+    AUDIO_RMS_THRESHOLD = args.rms_threshold
+    PAREC_LATENCY_MS = args.parec_latency_ms
 
     q_audio = queue.Queue(maxsize=QUEUE_MAX)
     
     # Initialize transcriber blocking until models load
     transcriber = Transcriber(q_audio, mode=MODE, src_lang=SRC_LANG, tgt_lang=TGT_LANG, output_device=args.output_device, output_sr=OUTPUT_SR)
     log("Models loaded, starting audio capture")
-    prod = AudioProducer(q_audio, args.audio_device)
+    prod = AudioProducer(q_audio, args.audio_device, PAREC_LATENCY_MS)
 
     transcriber.start()
     prod.start()

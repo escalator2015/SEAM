@@ -4,11 +4,13 @@
 
 # Core ML libraries
 torch
+torchvision
 transformers
 
 # Audio processing
 numpy
 scipy
+soundfile
 sounddevice
 webrtcvad
 
@@ -16,6 +18,17 @@ webrtcvad
 protobuf
 sentencepiece
 
+# Optional: for better performance
+accelerate
+xformers
+
 # System requirements (Linux)
 # Note: Install separately on your system:
 # sudo apt install pulseaudio-utils ffmpeg
+# pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128 --retries 10 --timeout 600
+
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+# pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130
+
+# pip install fairseq2 --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.9.1/cu128
+# pip install fairseq2 --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.10.0/cu128
