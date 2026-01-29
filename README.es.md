@@ -83,9 +83,40 @@ python marvin4000_seam.py --audio-device "alsa_output.pci-0000_00_1f.3.analog-st
 
 > 💡 **Tip PulseAudio:** crea un sink virtual y usa su `.monitor` como `--audio-device`. Para evitar realimentación, envía el TTS a tu salida real con `--output-device`.
 
+**Cómo crear un sink virtual (PulseAudio):**
+
+1. Crear el sink y darle un nombre:
+
+```bash
+pactl load-module module-null-sink sink_name=virtual_sink sink_properties=device.description=VirtualSink
+```
+
+2. Verifica el `.monitor` resultante para usarlo como `--audio-device`:
+
+```bash
+pactl list short sources | grep virtual_sink
+# Ejemplo: virtual_sink.monitor
+```
+
+3. Si quieres enviar el audio del sistema al sink virtual, usa tu herramienta de audio (por ejemplo, `pavucontrol`) y selecciona **VirtualSink** como salida para la app que deseas capturar.
+
+4. Para eliminar el sink cuando termines:
+
+```bash
+pactl unload-module module-null-sink
+```
+
 ### Configuración de idiomas
 
 Marvin4000 utiliza SeamlessM4T end‑to‑end para transcripción y traducción entre más de 100 idiomas. Soporta aplicaciones multilingües en tiempo real.
+
+**Nota sobre el TTS de SeamlessM4T v2:**
+
+* Para T2ST/S2ST, el modelo genera **unidades de audio discretas** y luego un **vocoder** las convierte en onda de audio.
+* La versión v2 usa la arquitectura **UnitY2**, con mejoras en **calidad** y **latencia** de la generación de voz.
+* SeamlessM4T no expone selección de voz; si necesitas voces específicas, usa un TTS externo y reemplaza el audio generado.
+
+Referencia: https://github.com/facebookresearch/seamless_communication
 
 <br>
 
