@@ -16,37 +16,21 @@
 
 **Marvin4000** captura, transcribe y traduce audio del sistema en tiempo real usando hardware local.
 
+## ✅ Características actuales
+
+* **STT en tiempo real** (speech → text) con parciales y finales
+* **S2ST end‑to‑end** (speech → speech) con salida de audio TTS
+* **Segmentación por VAD** (WebRTC) y corte por silencio o timeout
+* **Filtro por nivel de audio** (RMS) para evitar ruido muy bajo
+* **Salida de audio configurable** (dispositivo y sample rate)
+* **GPU/CPU automático** (CUDA si está disponible)
+
 <br>
 
 > ⚠️ **IMPORTANTE:**
 >
-> * Si estás en **Windows**, la captura de audio debe ser implementada manualmente mediante una alternativa a `parec` que proporcione datos de audio del sistema en formato `float32`.
-
-<br>
-
-## 📊 Rendimiento probado
-
-| GPU & Modelos usados                                                | Latencia (s) | WER       | BLEU-1/4/Corpus | VRAM        |
-| ---------------------------------------------------------------- | ----------- | --------- | --------------- | ----------- |
-| RTX 4060 Ti 16GB<br>seamless-m4t-v2-large (STT/S2ST) | 2-3     | 6 % | 74/39/52    | 11.4 GB |
-
-#### Corpus de prueba
-
-* **Audio**: 25 fragmentos aleatorios de audiolibros de [LibriSpeech](https://www.openslr.org/12) (media: 5 min/fragmento)
-* **Transcripción de referencia**: Transcripciones oficiales de LibriSpeech
-* **Traducción de referencia**: Generada con Claude & GPT y revisada manualmente (Inglés → Español)
-* **Total evaluado**: \~120 minutos de audio
-
-#### Cálculo de métricas
-
-* **WER**: Calculado con [jiwer](https://github.com/jitsi/jiwer), normalizado para puntuación
-* **BLEU**: Implementación corpus-level con tokenización lowercase, clipping de n-gramas y brevity penalty
-* **BLEU-1/4/Corpus**: Precisión 1-grama / 4-grama / score corpus completo
-* **Latencia**: Medida en condiciones reales con RTX 4060 Ti 16GB y RTX 2060 6GB
-
-#### Limitaciones
-
-Aunque las traducciones de referencia son de alta calidad, reconocemos que no son equivalentes a traducciones humanas profesionales. Sin embargo, proveen un estándar consistente para comparar el rendimiento del sistema, siguiendo metodologías similares a las empleadas en evaluaciones como [FLEURS](https://arxiv.org/abs/2205.12446) y [CoVoST 2](https://arxiv.org/abs/2007.10310).
+> * Este proyecto está pensado para **Linux** con **PulseAudio** o **pipewire‑pulse** (usa `parec` y `pactl`).
+> * En **Windows** no hay soporte nativo; la captura de audio requeriría una alternativa a `parec` que entregue audio `float32`.
 
 <br>
 
@@ -54,12 +38,15 @@ Aunque las traducciones de referencia son de alta calidad, reconocemos que no so
 
 ### Requisitos
 
+* Linux con PulseAudio o pipewire‑pulse
+* CUDA **obligatorio** (se usa automáticamente si está disponible)
+
 ```bash
 sudo apt install python3-pip pulseaudio-utils ffmpeg
-git clone https://github.com/XOREngine/marvin4000.git
-cd marvin4000
 pip install -r requirements.txt
 ```
+
+> El `requirements.txt` incluye **solo** dependencias mínimas para ejecutar STT/S2ST con SeamlessM4T.
 
 ### Ejecución básica
 
@@ -118,25 +105,27 @@ Marvin4000 utiliza SeamlessM4T end‑to‑end para transcripción y traducción 
 
 Referencia: https://github.com/facebookresearch/seamless_communication
 
-<br>
+### Parámetros CLI disponibles
 
-## 🔬 Arquitectura técnica
-
-* **Separación de hilos (Threading)**: Captura de audio | SeamlessM4T | TTS. Reducción 68% latencia
-* **Cuantización Int8**: Implementación bits-and-bytes para los modelos
-* **VAD inteligente**: WebRTC + segmentación conservadora (1.2s silencio mínimo) + validación lingüística
-* **Memoria eficiente**: Buffer circular y segmentación por VAD
-* **Latencia híbrida**: Parciales progresivos (2-3s percibida) en modo STT
-* **Segmentación adaptativa**: Evita fragmentos <0.5s, cortes mínimos 2.5s
-* **Decodificación controlada**: `task` y `tgt_lang` para controlar STT y S2ST
+* `--audio-device` (requerido): fuente monitor de PulseAudio
+* `--mode`: `stt` o `s2st`
+* `--src-lang`: idioma fuente (ej. `eng`)
+* `--tgt-lang`: idioma destino (requerido en `s2st`)
+* `--output-device`: dispositivo de salida para TTS (sounddevice)
+* `--output-sr`: sample rate de salida (por defecto 16000)
 
 <br>
 
-### Parámetros de configuración ajustables
+## 🔬 Detalles técnicos actuales
 
-> **Nota:** Si experimentas demasiada latencia, puedes reducir `num_beams` o acortar `max_new_tokens`. Esto hará las inferencias más rápidas a costa de una leve pérdida de calidad.
+* **Captura**: `parec` (PulseAudio / pipewire‑pulse) en `float32`
+* **Procesamiento**: conversión a mono 16 kHz y VAD con WebRTC
+* **Segmentación**: por silencio o timeout, con parciales en STT
+* **Salida TTS**: reproducción con `sounddevice` en el dispositivo elegido
 
-**Segmentación y flujo:**
+### Parámetros internos relevantes
+
+> **Nota:** Para bajar latencia puedes reducir `num_beams` o `max_new_tokens` en el código.
 
 ```python
 TIMEOUT_SEC = 12.0           # Tiempo máximo sin flush
@@ -147,36 +136,6 @@ VAD_SILENCE_DURATION_SEC = 1.2
 MIN_CUT_DURATION_SEC = 2.5
 AUDIO_RMS_THRESHOLD = 0.0025 # Nivel mínimo de volumen aceptado
 ```
-
-**Inferencia SeamlessM4T (STT/S2ST):**
-
-```python
-gen = self.model.generate(
-    **inputs,
-    tgt_lang="spa",
-    task="s2st",             # o "transcribe" para STT
-    generate_speech=True,
-    max_new_tokens=256,
-    num_beams=3,
-    do_sample=False,
-)
-```
-
-### Optimizaciones para hardware potente
-
-Para GPUs con >20GB VRAM (RTX 4090, A40, A100), se pueden implementar **CUDA streams** para paralelización en SeamlessM4T:
-
-```python
-# Modificaciones sugeridas para hardware potente:
-audio_lock = threading.Lock()
-tts_lock = threading.Lock()
-
-stream_audio = torch.cuda.Stream()
-stream_tts = torch.cuda.Stream()
-# Potencial mejora estimada: +15-25% throughput
-```
-
-<br>
 
 ## 📜 Modelos y licencias
 
@@ -195,9 +154,7 @@ stream_tts = torch.cuda.Stream()
 ### Inspiración técnica y papers
 
 * [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp) – ejecución tiempo real
-* [TimDettmers/bitsandbytes](https://github.com/TimDettmers/bitsandbytes) – cuantización
-* [guillaumekln/faster-whisper](https://github.com/guillaumekln/faster-whisper) – buffering eficiente
-* [snakers4/silero-vad](https://github.com/snakers4/silero-vad) – VAD optimizado
+* [guillaumekln/faster-whisper](https://github.com/guillaumekln/faster-whisper) – buffering eficiente (referencia)
 * [SeamlessM4T: Massively Multilingual & Multimodal Machine Translation](https://arxiv.org/abs/2308.11596)
 * [Efficient Low-Bit Quantization of Transformer-Based Language Models](https://arxiv.org/abs/2305.12889)
 
@@ -218,3 +175,24 @@ Si además compartes mejoras o nos mencionas como referencia, será siempre bien
 <br>
 
 <!-- keywords: seamlessM4T, realtime transcription, translation, streaming audio, cuda, multilingual, vad, low latency, STT, S2ST, TTS -->
+
+---
+
+## 🧪 Ejemplos de comandos (marvin4000_seam.py)
+
+```bash
+# STT básico (inglés → texto)
+python marvin4000_seam.py --audio-device "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor" --mode stt --src-lang eng
+
+# STT con idioma fuente español
+python marvin4000_seam.py --audio-device "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor" --mode stt --src-lang spa
+
+# S2ST inglés → español con salida por dispositivo default
+python marvin4000_seam.py --audio-device "virtual_sink.monitor" --mode s2st --src-lang eng --tgt-lang spa --output-device "default"
+
+# S2ST francés → inglés con sample rate de salida personalizado
+python marvin4000_seam.py --audio-device "virtual_sink.monitor" --mode s2st --src-lang fra --tgt-lang eng --output-device "default" --output-sr 22050
+
+# S2ST alemán → italiano con dispositivo de salida específico (ID de sounddevice)
+python marvin4000_seam.py --audio-device "virtual_sink.monitor" --mode s2st --src-lang deu --tgt-lang ita --output-device 3
+```

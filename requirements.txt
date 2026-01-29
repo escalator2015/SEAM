@@ -5,7 +5,6 @@
 # Core ML libraries
 torch
 transformers
-bitsandbytes
 
 # Audio processing
 numpy
@@ -13,16 +12,9 @@ scipy
 sounddevice
 webrtcvad
 
-# Tokenizers and model processing
+# Tokenizers and model processing (requeridos por SeamlessM4T)
 protobuf
 sentencepiece
-
-# Evaluation metrics
-jiwer
-
-# Optional: for better performance
-accelerate
-xformers
 
 # System requirements (Linux)
 # Note: Install separately on your system:

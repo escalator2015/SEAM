@@ -389,6 +389,16 @@ def main():
     parser.add_argument("--output-sr", type=int, default=OUTPUT_SR, help="Output sample rate for TTS")
     args = parser.parse_args()
 
+    if not torch.cuda.is_available():
+        parser.error("CUDA es obligatorio para ejecutar Marvin4000. Asegúrate de tener una GPU NVIDIA con drivers y CUDA instalados.")
+
+    try:
+        sink_list = sp.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True, check=False)
+        if sink_list.returncode != 0 or "virtual_sink" not in sink_list.stdout:
+            parser.error("No se detectó un sink virtual activo (virtual_sink). Crea uno con: pactl load-module module-null-sink sink_name=virtual_sink")
+    except FileNotFoundError:
+        parser.error("No se encontró pactl. Instala PulseAudio/pipewire-pulse para usar sinks virtuales.")
+
     if args.mode == "s2st" and not args.tgt_lang:
         parser.error("--tgt-lang es requerido en modo s2st")
 
